@@ -19,8 +19,31 @@
 #define OLED_RESET -1
 
 
-//3.Added OLED display object functionality, using I2C constructor with pin definitions from above
+//10.Added TCP server object with port number 5005
+WiFiServer tcpServer(5005);
 
+
+
+/*13.Added TCP client object and receive buffer for first laptop-to-board echo test
+Tracks the currently connected TCP client from the laptop.
+For now we support one client at a time, which is enough for the Project B echo test. */
+
+WiFiClient tcpClient;
+
+
+// Temporary receive buffer used to collect TCP bytes until a full line is received.
+String tcpRxBuffer = "";
+
+
+/*Non-blocking status timer.
+This replaces delay(5000) so the loop can keep checking TCP data frequently. */
+
+unsigned long lastStatusUpdateMs = 0;
+const unsigned long STATUS_UPDATE_INTERVAL_MS = 5000;
+
+
+
+//3.Added OLED display object functionality, using I2C constructor with pin definitions from above
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 
@@ -108,11 +131,23 @@ void setup()
     Serial.println(" dBm");
 
 
-    //7.Added OLED update after Wi-Fi connects, function call showOledMessage()
-    showOledMessage("Project B WiFi", "WiFi Connected", "IP:", ip.toString().c_str());
+    /*//7.Added OLED update after Wi-Fi connects, function call showOledMessage()
+    showOledMessage("Project B WiFi", "WiFi Connected", "IP:", ip.toString().c_str()); */
+    //11.Added: Start the TCP server after wi-fi connects
+    tcpServer.begin();
+    tcpServer.setNoDelay(true);
+
+    Serial.println("TCP server started on port 5005");
+
+    showOledMessage("Project B WiFi",
+                    ip.toString().c_str(),
+                    "RSSI: Ready",
+                    "TCP: Ready");
 
 }
 
+
+/*
 void loop()
 {
     // Basic connection heartbeat for bring-up.
@@ -132,7 +167,7 @@ void loop()
         showOledMessage("Project B WiFi",
                         ip.toString().c_str(),
                         ("RSSI: " + String(rssi) + " dBm").c_str(),
-                        "TCP: Not started");
+                        "TCP: Ready");          //12.Added Updated OLED heartbeat TCP: Ready to show TCP server status 
     }
     else
     {
@@ -145,4 +180,93 @@ void loop()
     }
     // Acceptable for this simple test; final Project B loop must return often for lwIP/TCP and OLED timing.
     delay(5000);
+}
+
+*/
+
+
+/*14.Added this: Replaced entire loop() with an active loop for Project B TCP echo milestone.
+Handles client accept, TCP receive/echo, OLED status updates, and Wi-Fi stack servicing.*/
+
+void loop()
+{
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        // If no client is connected, check whether the laptop has opened a new TCP connection.
+        if (!tcpClient || !tcpClient.connected())
+        {
+            WiFiClient newClient = tcpServer.available();
+
+            if (newClient)
+            {
+                tcpClient = newClient;
+                tcpClient.setNoDelay(true);
+
+                Serial.println("TCP client connected.");
+
+                showOledMessage("Project B WiFi",
+                                WiFi.localIP().toString().c_str(),
+                                ("RSSI: " + String(WiFi.RSSI()) + " dBm").c_str(),
+                                "Client Connected");
+            }
+        }
+
+        /* Drain all available TCP bytes without blocking.
+        Newline or carriage return marks the end of one test message.*/
+        while (tcpClient && tcpClient.connected() && tcpClient.available())
+        {
+            char rxChar = tcpClient.read();
+
+            if (rxChar == '\n' || rxChar == '\r')
+            {
+                if (tcpRxBuffer.length() > 0)
+                {
+                    Serial.print("TCP RX: ");
+                    Serial.println(tcpRxBuffer);
+
+                    // Echo milestone: send the same message back to prove laptop-to-board TCP communication works.
+                    tcpClient.println(tcpRxBuffer);
+
+                    Serial.print("TCP echo sent: ");
+                    Serial.println(tcpRxBuffer);
+
+                    tcpRxBuffer = "";
+                }
+            }
+            else
+            {
+                tcpRxBuffer += rxChar;
+            }
+        }
+
+        unsigned long nowMs = millis();
+
+        if (nowMs - lastStatusUpdateMs >= STATUS_UPDATE_INTERVAL_MS)
+        {
+            lastStatusUpdateMs = nowMs;
+
+            IPAddress ip = WiFi.localIP();
+            int rssi = WiFi.RSSI();
+
+            Serial.print("Still connected. IP: ");
+            Serial.print(ip);
+            Serial.print(" RSSI: ");
+            Serial.print(rssi);
+            Serial.println(" dBm");
+
+            showOledMessage("Project B WiFi",
+                            ip.toString().c_str(),
+                            ("RSSI: " + String(rssi) + " dBm").c_str(),
+                            (tcpClient && tcpClient.connected()) ? "Client Connected" : "TCP: Ready");
+        }
+    }
+    else
+    {
+        Serial.println("Wi-Fi disconnected.");
+
+        showOledMessage("Project B WiFi", "WiFi Lost", "Recheck router", "");
+    }
+    
+    // Let the ESP8266 background Wi-Fi/lwIP stack run.
+    yield();
 }
