@@ -1,14 +1,21 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
+
+/*Local private header containing WIFI_SSID and WIFI_PASSWORD.
+This file is excluded from Git; only wifi_secrets.h.template is committed.*/
 #include "wifi_secrets.h"
 
-//1.Added OLED display/I2C libraries
+/*OLED/I2C support:
+Wire.h provides the I2C HAL, Adafruit_GFX provides text/graphics APIs,
+ and Adafruit_SSD1306 drives the 128x64 OLED controller.
+*/
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
 
-//2.Added OLED pin/address configuration macros
+/*OLED hardware configuration for ESP8266 NodeMCU.
+D2 maps to GPIO4/SDA and D1 maps to GPIO5/SCL for the I2C OLED.*/
 
 #define I2C_SDA_PIN D2
 #define I2C_SCL_PIN D1
@@ -19,35 +26,39 @@
 #define OLED_RESET -1
 
 
-//10.Added TCP server object with port number 5005
+// TCP server object listens on Project B port 5005 so the laptop/Python GUI can connect over Wi-Fi.
 WiFiServer tcpServer(5005);
 
 
-
-/*13.Added TCP client object and receive buffer for first laptop-to-board echo test
-Tracks the currently connected TCP client from the laptop.
-For now we support one client at a time, which is enough for the Project B echo test. */
+/*Tracks the currently connected laptop TCP client.
+The first implementation supports one client at a time, which is enough for command testing.*/
 
 WiFiClient tcpClient;
 
 
-// Temporary receive buffer used to collect TCP bytes until a full line is received.
+/* Line-based receive buffer. TCP is a byte stream, so characters are collected 
+until '\n' or '\r' marks one full command. */
 String tcpRxBuffer = "";
 
 
-/*Non-blocking status timer.
-This replaces delay(5000) so the loop can keep checking TCP data frequently. */
+// Maintains current OLED invert state so each INVERT command can toggle ON/OFF predictably.
+bool oledInverted = false;
+
+
+/* Non-blocking status update timer.
+ millis() lets loop() refresh Serial/OLED status periodically without delay(5000),
+ so TCP receive handling and the ESP8266 Wi-Fi/lwIP stack stay responsive. */
 
 unsigned long lastStatusUpdateMs = 0;
 const unsigned long STATUS_UPDATE_INTERVAL_MS = 5000;
-
 
 
 //3.Added OLED display object functionality, using I2C constructor with pin definitions from above
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 
-//4.Added helper function for OLED messages
+/* Small OLED helper: writes up to four text lines to the display.
+const char* is used because Adafruit print APIs accept C-style strings. */
 
 void showOledMessage(const char *line1, const char *line2, const char *line3, const char *line4)
 {
@@ -62,6 +73,113 @@ void showOledMessage(const char *line1, const char *line2, const char *line3, co
     display.println(line4);
 
     display.display();
+}
+
+/*
+//15.Added a command handler function to convert TCP text commands into firmware responses,
+// starting with GET_STATUS.
+
+String handleCommand(const String &command)
+{
+    if (command == "GET_STATUS")
+    {
+        String response = "OK STATUS IP=";
+        response += WiFi.localIP().toString();
+        response += " RSSI=";
+        response += String(WiFi.RSSI());
+        response += " TCP=CONNECTED";
+
+        return response;
+    }
+
+    return "ERR UNKNOWN_COMMAND";
+}
+*/
+
+/*Command dispatcher for TCP messages.
+Converts one received text command into an OLED action and/or response string.
+
+Supported commands: GET_STATUS, CLEAR, SHOW_TEXT <msg>, SHOW_NUMBER <num>, INVERT.*/
+
+String handleCommand(const String &command)
+{
+    // Work on a trimmed copy so extra spaces/newline characters do not break command matching.
+    String trimmedCommand = command;
+    trimmedCommand.trim();
+
+    if (trimmedCommand.length() == 0)
+    {
+        return "ERR EMPTY_COMMAND";
+    }
+
+    // Status command returns board IP, live RSSI, and TCP state to the host.
+    if (trimmedCommand == "GET_STATUS")
+    {
+        String response = "OK STATUS IP=";
+        response += WiFi.localIP().toString();
+        response += " RSSI=";
+        response += String(WiFi.RSSI());
+        response += " TCP=CONNECTED";
+
+        return response;
+    }
+
+    // clearDisplay() updates the local framebuffer; display() pushes it to the physical OLED.
+    if (trimmedCommand == "CLEAR")
+    {
+        display.clearDisplay();
+        display.display();
+
+        return "OK CLEAR";
+    }
+
+    // Extract text after "SHOW_TEXT " and render it on the OLED.
+    if (trimmedCommand.startsWith("SHOW_TEXT "))
+    {
+        String message = trimmedCommand.substring(strlen("SHOW_TEXT "));
+        message.trim();
+
+        if (message.length() == 0)
+        {
+            return "ERR BAD_ARGUMENT";
+        }
+
+        showOledMessage("SHOW_TEXT", message.c_str(), "", "");
+
+        return "OK SHOW_TEXT";
+    }
+
+    // Extract number text after "SHOW_NUMBER " and render it on the OLED.
+    if (trimmedCommand.startsWith("SHOW_NUMBER "))
+    {
+        String numberText = trimmedCommand.substring(strlen("SHOW_NUMBER "));
+        numberText.trim();
+
+        if (numberText.length() == 0)
+        {
+            return "ERR BAD_ARGUMENT";
+        }
+
+        showOledMessage("SHOW_NUMBER", numberText.c_str(), "", "");
+
+        return "OK SHOW_NUMBER";
+    }
+
+    // Toggle OLED inversion state and return whether inversion is now ON or OFF.
+    if (trimmedCommand == "INVERT")
+    {
+        oledInverted = !oledInverted;
+        display.invertDisplay(oledInverted);
+
+        if (oledInverted)
+        {
+            return "OK INVERT ON";
+        }
+
+        return "OK INVERT OFF";
+    }
+
+    return "ERR UNKNOWN_COMMAND";
 }
 
 
@@ -104,8 +222,9 @@ void setup()
     // Start Wi-Fi association using credentials kept outside Git in wifi_secrets.h.
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-    // Initial bring-up uses a simple blocking wait.
-    // Later this should become non-blocking/reconnect-aware so TCP and OLED updates stay responsive.
+
+    /*Simple blocking Wi-Fi wait is acceptable during bring-up.
+    Later robustness work can replace this with reconnect/non-blocking handling. */
     while (WiFi.status() != WL_CONNECTED)
     {
         delay(500);
@@ -133,7 +252,8 @@ void setup()
 
     /*//7.Added OLED update after Wi-Fi connects, function call showOledMessage()
     showOledMessage("Project B WiFi", "WiFi Connected", "IP:", ip.toString().c_str()); */
-    //11.Added: Start the TCP server after wi-fi connects
+
+    // Start TCP server only after Wi-Fi is connected and the board has a valid IP address.
     tcpServer.begin();
     tcpServer.setNoDelay(true);
 
@@ -145,7 +265,6 @@ void setup()
                     "TCP: Ready");
 
 }
-
 
 /*
 void loop()
@@ -181,12 +300,16 @@ void loop()
     // Acceptable for this simple test; final Project B loop must return often for lwIP/TCP and OLED timing.
     delay(5000);
 }
-
 */
 
 
-/*14.Added this: Replaced entire loop() with an active loop for Project B TCP echo milestone.
-Handles client accept, TCP receive/echo, OLED status updates, and Wi-Fi stack servicing.*/
+
+/* Active Project B loop:
+1) accepts TCP client connections,
+2) receives line-based commands,
+3) dispatches commands through handleCommand(),
+4) updates OLED/Serial status without blocking,
+5) calls yield() so ESP8266 Wi-Fi/lwIP background work can run. */
 
 void loop()
 {
@@ -195,7 +318,8 @@ void loop()
         // If no client is connected, check whether the laptop has opened a new TCP connection.
         if (!tcpClient || !tcpClient.connected())
         {
-            WiFiClient newClient = tcpServer.available();
+            // accept() checks for a new pending TCP client connection without blocking.
+            WiFiClient newClient = tcpServer.accept();
 
             if (newClient)
             {
@@ -211,8 +335,8 @@ void loop()
             }
         }
 
-        /* Drain all available TCP bytes without blocking.
-        Newline or carriage return marks the end of one test message.*/
+        /*Drain available TCP bytes without blocking.
+        The command is considered complete when '\n' or '\r' is received.*/
         while (tcpClient && tcpClient.connected() && tcpClient.available())
         {
             char rxChar = tcpClient.read();
@@ -221,6 +345,7 @@ void loop()
             {
                 if (tcpRxBuffer.length() > 0)
                 {
+                    /*16.Added this: Replaced echo send inside TCP receive block 
                     Serial.print("TCP RX: ");
                     Serial.println(tcpRxBuffer);
 
@@ -229,6 +354,26 @@ void loop()
 
                     Serial.print("TCP echo sent: ");
                     Serial.println(tcpRxBuffer);
+
+                    tcpRxBuffer = "";
+                    */
+                    
+                    //16.Added command-processing response path to replace raw TCP echo, so received TCP 
+                    //messages now go through handleCommand() before replying to the laptop.
+
+                    Serial.print("TCP RX command: ");
+                    Serial.println(tcpRxBuffer);
+
+
+                    // Route the received TCP line into the command dispatcher instead of echoing raw text.
+                    String response = handleCommand(tcpRxBuffer);
+
+
+                    // Send command result back to the laptop/Python client.
+                    tcpClient.println(response);
+
+                    Serial.print("TCP response sent: ");
+                    Serial.println(response);
 
                     tcpRxBuffer = "";
                 }
@@ -266,7 +411,7 @@ void loop()
 
         showOledMessage("Project B WiFi", "WiFi Lost", "Recheck router", "");
     }
-    
+
     // Let the ESP8266 background Wi-Fi/lwIP stack run.
     yield();
 }
