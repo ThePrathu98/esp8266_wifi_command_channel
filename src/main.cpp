@@ -80,6 +80,8 @@ bool oledHoldActive = false;
 unsigned long oledHoldStartMs = 0;
 const unsigned long OLED_HOLD_DURATION_MS = 10000;
 
+//Max buffer protection to avoid memory issues if client sends too much data without newlines.
+const size_t TCP_RX_BUFFER_LIMIT = 128;
 
 /*
 OLED display object using I2C.
@@ -135,7 +137,28 @@ void updateStatusDisplay()
                     ("RSSI: " + String(rssi) + " dBm").c_str(),
                     (tcpClient && tcpClient.connected()) ? "Client Connected" : "TCP: Ready");
 }
+/*
+Closes the current TCP client and clears any partial command data.
 
+Why:
+TCP is a byte stream. If a client disconnects in the middle of a command,
+tcpRxBuffer may contain leftover characters. Clearing it prevents the next
+client command from mixing with old data.
+*/
+void closeTcpClient()
+{
+    if (tcpRxBuffer.length() > 0)
+    {
+        Serial.println("TCP partial command cleared.");
+    }
+
+    if (tcpClient)
+    {
+        tcpClient.stop();
+    }
+
+    tcpRxBuffer = "";
+}
 
 /*
 Converts one received TCP command into a firmware action and response.
@@ -210,7 +233,7 @@ String handleCommand(const String &command)
     {
         return "ERR BAD_ARGUMENT";
     }
-    
+
     if (trimmedCommand.startsWith("SHOW_NUMBER "))
     {
         String numberText = trimmedCommand.substring(strlen("SHOW_NUMBER "));
@@ -312,11 +335,12 @@ void loop()
 {
     if (WiFi.status() == WL_CONNECTED)
     {
-        /*
-        Accept new client only when no client is currently connected.
-        */
+        /* If the previous client disconnected, close it cleanly and clear old RX data.
+        Then check if a new laptop/Python client is waiting. */
         if (!tcpClient || !tcpClient.connected())
         {
+            closeTcpClient();
+
             WiFiClient newClient = tcpServer.accept();
 
             if (newClient)
@@ -359,7 +383,20 @@ void loop()
             }
             else
             {
-                tcpRxBuffer += rxChar;
+                /*  Append received TCP characters only while the command buffer is within limit.
+                This prevents a very long/malformed command from growing the String forever
+                and wasting ESP8266 RAM. If the limit is exceeded, close the client and clear
+                the partial command.    */
+                if (tcpRxBuffer.length() < TCP_RX_BUFFER_LIMIT)
+                {
+                    tcpRxBuffer += rxChar;
+                }
+                else
+                {
+                    Serial.println("TCP RX buffer overflow. Closing client.");
+                    closeTcpClient();
+                    break;
+                }
             }
         }
 
