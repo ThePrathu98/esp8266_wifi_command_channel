@@ -4,4 +4,8 @@
 .vscode/launch.json
 .vscode/ipch
 
+.venv/
+__pycache__/
+*.pyc
+
 include/wifi_secrets.h
