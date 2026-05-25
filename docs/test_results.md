@@ -131,6 +131,19 @@ Webcam recording
 
 CLEAR is better shown in video because a blank OLED photo is less informative.
 
+## Final Evidence Captured
+
+The final evidence includes:
+
+- GUI command log showing GET_STATUS, SHOW_TEXT, SHOW_NUMBER, CLEAR, and INVERT ON/OFF responses.
+- PlatformIO Monitor logs showing TCP RX commands and responses for all valid GUI commands.
+- PowerShell ping and Test-NetConnection showing the ESP8266 is reachable on port 5005.
+- PowerShell parser tests showing ERR UNKNOWN_COMMAND, ERR EMPTY_COMMAND, and ERR BAD_ARGUMENT handling.
+- TCP overflow/recovery test showing malformed long input closes the bad client and GET_STATUS works afterward.
+- OLED photos showing default status, SHOW_TEXT, SHOW_NUMBER, CLEAR blank screen, INVERT ON, and INVERT OFF behavior.
+- Saleae screenshots showing I2C writes to OLED address 0x3C during GUI-triggered OLED updates.
+- Final phone demo video showing GUI -> TCP -> ESP8266 -> OLED behavior.
+
 ## Final Result
 
 Final result is PASS when:
